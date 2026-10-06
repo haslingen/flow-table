@@ -22,3 +22,15 @@ Programmet tar en 3280 × 2464-bild, hittar den runda bordsskivan (standard Ø30
 - `measurements.csv` med area, ekvivalent diameter och största/minsta diameter
 
 Ljuset och materialet avgör tröskelvärdet. Börja med `--dark-threshold 115` och justera vid behov, exempelvis `--dark-threshold 140`.
+
+## Webbapp på Pi:n
+
+Webbappen visar senaste markerade bild och mätvärden samt kan ta en ny mätning från en mobil eller dator på samma nätverk.
+
+```bash
+sudo install -m 644 deploy/flowtable-web.service /etc/systemd/system/flowtable-web.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now flowtable-web
+```
+
+Öppna sedan `http://lasersensor:8767` eller `http://192.168.1.211:8767` på det lokala nätverket.
