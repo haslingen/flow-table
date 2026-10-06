@@ -57,7 +57,10 @@ def find_table_circle(image: np.ndarray) -> tuple[int, int, int]:
         maxRadius=int(min(gray.shape[:2]) * 0.49),
     )
     if circles is None:
-        raise RuntimeError("Could not find the circular table edge.")
+        raise RuntimeError(
+            "Bordsskivans runda kant syns inte. Rikta kameran rakt ned och se till "
+            "att hela Ø300 mm-skivan ryms i bilden."
+        )
     x, y, radius = max(np.round(circles[0]).astype(int), key=lambda c: c[2])
     return int(x), int(y), int(radius)
 

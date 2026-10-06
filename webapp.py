@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 from datetime import datetime
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -76,6 +77,15 @@ def measured_image(measurement: dict[str, object] | None) -> str | None:
     return candidate if (CAPTURES / candidate).is_file() else None
 
 
+def readable_capture_error(output: str) -> str:
+    """Keep camera driver diagnostics out of the browser-facing error message."""
+    clean = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
+    marker = "measurement failed:"
+    if marker in clean:
+        return clean[clean.index(marker) + len(marker) :].strip()
+    return "Kamerabilden kunde inte analyseras. Kontrollera att slagbordet syns helt i bilden."
+
+
 @app.get("/")
 def dashboard():
     measurement = latest_measurement()
@@ -103,7 +113,7 @@ def capture():
         timeout=60,
     )
     if result.returncode:
-        return jsonify(error=result.stdout[-1000:]), 422
+        return jsonify(error=readable_capture_error(result.stdout)), 422
     return jsonify(ok=True, output=result.stdout)
 
 
