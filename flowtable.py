@@ -54,6 +54,15 @@ def parse_args() -> argparse.Namespace:
         help="Number of motor strikes in one test. Defaults to 15.",
     )
     parser.add_argument(
+        "--energy-per-strike-j",
+        type=float,
+        help="Mechanical energy delivered by one strike in joules, when known.",
+    )
+    parser.add_argument("--series-id", help="Identifier for the active strike series.")
+    parser.add_argument("--strike", type=int, help="Current strike number; the baseline is 0.")
+    parser.add_argument("--target-strikes", type=int, help="Total configured strikes in the series.")
+    parser.add_argument("--data-root", type=Path, default=Path("data"))
+    parser.add_argument(
         "--calibrate",
         action="store_true",
         help="Save the reference disk's largest diameter for later measurements.",
@@ -66,11 +75,11 @@ def parse_args() -> argparse.Namespace:
 
 def load_calibration(path: Path) -> dict[str, object]:
     if not path.exists():
-        return {"table_diameter_mm": 297.0, "strikes_per_test": 15}
+        return {"table_diameter_mm": 297.0, "strikes_per_test": 15, "energy_per_strike_j": None}
     try:
         with path.open() as file:
             data = json.load(file)
-        return {"table_diameter_mm": float(data["table_diameter_mm"]), "strikes_per_test": 15, **data}
+        return {"table_diameter_mm": float(data["table_diameter_mm"]), "strikes_per_test": 15, "energy_per_strike_j": None, **data}
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
         raise RuntimeError(f"Could not read calibration file {path}: {error}") from error
 
@@ -79,12 +88,14 @@ def save_calibration(
     path: Path,
     table_diameter_mm: float,
     strikes_per_test: int,
+    energy_per_strike_j: float | None,
     ellipse: tuple[tuple[float, float], tuple[float, float], float],
 ) -> None:
     center, axes, angle = ellipse
     data = {
         "table_diameter_mm": table_diameter_mm,
         "strikes_per_test": strikes_per_test,
+        "energy_per_strike_j": energy_per_strike_j,
         "calibrated_at_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
         "ellipse_center_px": [round(value, 3) for value in center],
         "ellipse_axes_px": [round(value, 3) for value in axes],
@@ -274,6 +285,60 @@ def append_csv(path: Path, captured_at: str, result: dict[str, object]) -> None:
         writer.writerow({"captured_at_utc": captured_at, **{field: result[field] for field in fields[1:]}})
 
 
+def write_data_record(
+    data_root: Path,
+    captured_at: str,
+    raw_path: Path,
+    result_path: Path,
+    result: dict[str, object],
+    calibration: dict[str, object],
+    table_diameter_mm: float,
+    energy_per_strike_j: float | None,
+    args: argparse.Namespace,
+) -> Path:
+    """Store one portable, timestamped record for every measured camera image."""
+    local_time = datetime.now().astimezone()
+    day_directory = data_root / local_time.strftime("%Y-%m-%d")
+    day_directory.mkdir(parents=True, exist_ok=True)
+    filename = f"data_{local_time.strftime('%Y-%m-%d:%H%M%S')}.json"
+    record_path = day_directory / filename
+    if record_path.exists():
+        record_path = day_directory / f"data_{local_time.strftime('%Y-%m-%d:%H%M%S')}_{local_time.microsecond:06d}.json"
+    center, axes, angle = result["table_ellipse"]
+    cumulative_energy = energy_per_strike_j * args.strike if energy_per_strike_j is not None and args.strike is not None else None
+    record = {
+        "schema_version": 1,
+        "measurement_id": record_path.stem,
+        "captured_at_utc": captured_at,
+        "captured_at_local": local_time.isoformat(),
+        "images": {"raw": str(raw_path), "measured": str(result_path)},
+        "calibration": {
+            "reference_disk_diameter_mm": table_diameter_mm,
+            "reference_ellipse_px": {
+                "center": [float(value) for value in center],
+                "axes": [float(value) for value in axes],
+                "angle_deg": float(angle),
+            },
+            "calibrated_at_utc": calibration.get("calibrated_at_utc"),
+        },
+        "sequence": {"id": args.series_id, "strike": args.strike, "target_strikes": args.target_strikes},
+        "energy": {"per_strike_j": energy_per_strike_j, "cumulative_input_j": cumulative_energy},
+        "measurement": {
+            "area_mm2": float(result["area_mm2"]),
+            "area_cm2": float(result["area_cm2"]),
+            "equivalent_diameter_mm": float(result["equivalent_diameter_mm"]),
+            "diameter_max_mm": float(result["diameter_max_mm"]),
+            "diameter_min_mm": float(result["diameter_min_mm"]),
+            "pixels_per_mm": float(result["pixels_per_mm"]),
+            "material_detected": result["contour"] is not None,
+        },
+    }
+    with record_path.open("w") as file:
+        json.dump(record, file, indent=2)
+        file.write("\n")
+    return record_path
+
+
 def main() -> None:
     args = parse_args()
     if not 0 <= args.dark_threshold <= 255:
@@ -281,10 +346,13 @@ def main() -> None:
     calibration = load_calibration(args.calibration_file)
     table_diameter_mm = args.table_diameter_mm or float(calibration["table_diameter_mm"])
     strikes_per_test = args.strikes if args.strikes is not None else int(calibration["strikes_per_test"])
+    energy_per_strike_j = args.energy_per_strike_j if args.energy_per_strike_j is not None else calibration.get("energy_per_strike_j")
     if table_diameter_mm <= 0:
         sys.exit("--table-diameter-mm must be positive.")
     if strikes_per_test <= 0:
         sys.exit("--strikes must be a positive integer.")
+    if energy_per_strike_j is not None and energy_per_strike_j <= 0:
+        sys.exit("--energy-per-strike-j must be positive when set.")
     args.output.mkdir(parents=True, exist_ok=True)
 
     camera = Picamera2()
@@ -302,7 +370,7 @@ def main() -> None:
             ellipse = find_table_ellipse(image, args.table_threshold)
         except RuntimeError as error:
             sys.exit(f"Saved raw image to {raw_path}; calibration failed: {error}")
-        save_calibration(args.calibration_file, table_diameter_mm, strikes_per_test, ellipse)
+        save_calibration(args.calibration_file, table_diameter_mm, strikes_per_test, energy_per_strike_j, ellipse)
         calibration_path = args.output / f"{captured_at}_calibration.jpg"
         cv2.imwrite(str(calibration_path), render_calibration(image, ellipse, table_diameter_mm))
         print(f"Calibration image: {calibration_path}")
@@ -323,8 +391,20 @@ def main() -> None:
     result_path = args.output / f"{captured_at}_measured.jpg"
     cv2.imwrite(str(result_path), render_result(image, result))
     append_csv(args.output / "measurements.csv", captured_at, result)
+    data_path = write_data_record(
+        args.data_root,
+        captured_at,
+        raw_path,
+        result_path,
+        result,
+        calibration,
+        table_diameter_mm,
+        energy_per_strike_j,
+        args,
+    )
     print(f"Raw image: {raw_path}")
     print(f"Result image: {result_path}")
+    print(f"Data record: {data_path}")
     print(f"Area: {result['area_cm2']:.1f} cm2")
     print(f"Equivalent diameter: {result['equivalent_diameter_mm']:.1f} mm")
     print(f"Max/min diameter: {result['diameter_max_mm']:.1f} / {result['diameter_min_mm']:.1f} mm")

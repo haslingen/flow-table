@@ -44,9 +44,9 @@ PAGE = """<!doctype html>
 </head>
 <body><main>
   <header><div><h1>FlowTable</h1><p class="sub">Senaste kameramätningen från slagbordet</p></div><div><button id="capture">Ta ny mätning</button></div></header>
-  <section class="card" style="margin-bottom:16px"><form id="calibrate"><strong>Kalibrering</strong><div class="label" style="margin:6px 0 10px">Lämna den vita skivan tom. Ange dess största verkliga diameter och antal slag för ett test.</div><label for="diameter">Största diameter (mm)</label> <input id="diameter" type="number" min="1" step="0.1" value="{{ calibration.table_diameter_mm }}" required> <label for="strikes" style="margin-left:12px">Antal slag</label> <input id="strikes" type="number" min="1" step="1" value="{{ calibration.strikes_per_test }}" required> <button type="submit" style="margin-left:8px">Kalibrera</button></form></section>
+  <section class="card" style="margin-bottom:16px"><form id="calibrate"><strong>Kalibrering</strong><div class="label" style="margin:6px 0 10px">Lämna den vita skivan tom. Ange dess största verkliga diameter, antal slag och vid behov faktisk mekanisk energi per slag.</div><label for="diameter">Största diameter (mm)</label> <input id="diameter" type="number" min="1" step="0.1" value="{{ calibration.table_diameter_mm }}" required> <label for="strikes" style="margin-left:12px">Antal slag</label> <input id="strikes" type="number" min="1" step="1" value="{{ calibration.strikes_per_test }}" required> <label for="energy" style="margin-left:12px">Energi/slag (J)</label> <input id="energy" type="number" min="0" step="0.001" value="{{ calibration.energy_per_strike_j if calibration.energy_per_strike_j is not none else '' }}" placeholder="Ej angivet"> <button type="submit" style="margin-left:8px">Kalibrera</button></form></section>
   <section class="card" style="margin-bottom:16px"><strong>Slagserie</strong><div class="label" style="margin:6px 0 10px">Delmätning sparar en bild efter ett slag och räknar ned serien.</div><div class="value">{{ sequence.remaining }} <span class="unit">slag kvar av {{ sequence.target }}</span></div><div style="margin-top:12px"><button id="reset-series">Ny serie</button> <button id="partial" {% if sequence.remaining == 0 %}disabled{% endif %}>Delmätning · {{ sequence.remaining }} kvar</button></div></section>
-  {% if analysis %}<section class="card" style="margin-bottom:16px"><h2 style="font-size:17px;margin:0 0 6px">Analys av aktuell slagserie</h2><div class="label">{{ analysis.summary }}</div><section class="stats" style="margin:14px 0 0"><div class="card"><div class="label">Areaförändring</div><div class="value">{{ analysis.area_change|round(1) }} <span class="unit">cm²</span></div></div><div class="card"><div class="label">Diameterförändring</div><div class="value">{{ analysis.diameter_change|round(1) }} <span class="unit">mm</span></div></div><div class="card"><div class="label">Senaste area</div><div class="value">{{ analysis.last.area_cm2|round(1) }} <span class="unit">cm²</span></div></div></section><table><thead><tr><th>Slag</th><th>Area</th><th>Ekv. Ø</th><th>Max Ø</th><th>Min Ø</th></tr></thead><tbody>{% for point in sequence.measurements %}<tr><td>{{ point.strike }}</td><td>{{ point.area_cm2|round(1) }} cm²</td><td>{{ point.equivalent_diameter_mm|round(1) }} mm</td><td>{{ point.diameter_max_mm|round(1) }} mm</td><td>{{ point.diameter_min_mm|round(1) }} mm</td></tr>{% endfor %}</tbody></table></section>{% endif %}
+  {% if analysis %}<section class="card" style="margin-bottom:16px"><h2 style="font-size:17px;margin:0 0 6px">Analys av aktuell slagserie</h2><div class="label">{{ analysis.summary }}</div><section class="stats" style="margin:14px 0 0"><div class="card"><div class="label">Areaförändring</div><div class="value">{{ analysis.area_change|round(1) }} <span class="unit">cm²</span></div></div><div class="card"><div class="label">Diameterförändring</div><div class="value">{{ analysis.diameter_change|round(1) }} <span class="unit">mm</span></div></div><div class="card"><div class="label">Tillförd energi</div><div class="value">{{ analysis.energy_input_j|round(3) if analysis.energy_input_j is not none else 'Ej angivet' }} <span class="unit">{% if analysis.energy_input_j is not none %}J{% endif %}</span></div></div></section><table><thead><tr><th>Slag</th><th>Area</th><th>Ekv. Ø</th><th>Max Ø</th><th>Min Ø</th><th>Energi</th></tr></thead><tbody>{% for point in sequence.measurements %}<tr><td>{{ point.strike }}</td><td>{{ point.area_cm2|round(1) }} cm²</td><td>{{ point.equivalent_diameter_mm|round(1) }} mm</td><td>{{ point.diameter_max_mm|round(1) }} mm</td><td>{{ point.diameter_min_mm|round(1) }} mm</td><td>{{ point.cumulative_input_j|round(3) if point.cumulative_input_j is not none else '—' }}{% if point.cumulative_input_j is not none %} J{% endif %}</td></tr>{% endfor %}</tbody></table></section>{% endif %}
   <p id="status">{{ status }}</p>
   {% if measurement %}
   <section class="stats">
@@ -61,7 +61,7 @@ PAGE = """<!doctype html>
 </main><script>
 const button=document.querySelector('#capture'), status=document.querySelector('#status'), calibration=document.querySelector('#calibrate'), resetSeries=document.querySelector('#reset-series'), partial=document.querySelector('#partial');
 button.addEventListener('click', async () => { button.disabled=true; status.textContent='Tar bild och beräknar utbredningen…'; try { const r=await fetch('/capture',{method:'POST'}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Mätningen misslyckades: '+e.message; button.disabled=false; } });
-calibration.addEventListener('submit', async (event) => { event.preventDefault(); const value=Number(document.querySelector('#diameter').value), strikes=Number(document.querySelector('#strikes').value); if (!(value>0 && Number.isInteger(strikes) && strikes>0)) return; status.textContent='Tar kalibreringsbild…'; try { const r=await fetch('/calibrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table_diameter_mm:value,strikes_per_test:strikes})}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Kalibreringen misslyckades: '+e.message; } });
+calibration.addEventListener('submit', async (event) => { event.preventDefault(); const value=Number(document.querySelector('#diameter').value), strikes=Number(document.querySelector('#strikes').value), energyText=document.querySelector('#energy').value, energy=energyText===''?null:Number(energyText); if (!(value>0 && Number.isInteger(strikes) && strikes>0 && (energy===null || energy>0))) return; status.textContent='Tar kalibreringsbild…'; try { const r=await fetch('/calibrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table_diameter_mm:value,strikes_per_test:strikes,energy_per_strike_j:energy})}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Kalibreringen misslyckades: '+e.message; } });
 resetSeries.addEventListener('click', async () => { resetSeries.disabled=true; status.textContent='Startar ny slagserie…'; try { const r=await fetch('/sequence/reset',{method:'POST'}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Kunde inte starta serien: '+e.message; resetSeries.disabled=false; } });
 partial.addEventListener('click', async () => { partial.disabled=true; status.textContent='Sparar delmätning…'; try { const r=await fetch('/sequence/step',{method:'POST'}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Delmätningen misslyckades: '+e.message; partial.disabled=false; } });
 </script></body></html>"""
@@ -104,19 +104,20 @@ def readable_capture_error(output: str) -> str:
 
 def calibration_settings() -> dict[str, float]:
     if not CALIBRATION.exists():
-        return {"table_diameter_mm": 297.0, "strikes_per_test": 15}
+        return {"table_diameter_mm": 297.0, "strikes_per_test": 15, "energy_per_strike_j": None}
     try:
         with CALIBRATION.open() as file:
             data = json.load(file)
-            return {"table_diameter_mm": float(data["table_diameter_mm"]), "strikes_per_test": int(data.get("strikes_per_test", 15))}
+            energy = data.get("energy_per_strike_j")
+            return {"table_diameter_mm": float(data["table_diameter_mm"]), "strikes_per_test": int(data.get("strikes_per_test", 15)), "energy_per_strike_j": float(energy) if energy is not None else None}
     except (OSError, ValueError, KeyError, json.JSONDecodeError):
-        return {"table_diameter_mm": 297.0, "strikes_per_test": 15}
+        return {"table_diameter_mm": 297.0, "strikes_per_test": 15, "energy_per_strike_j": None}
 
 
 def sequence_settings() -> dict[str, int]:
     target = int(calibration_settings()["strikes_per_test"])
     if not SEQUENCE_STATE.exists():
-        return {"target": target, "completed": 0, "remaining": target, "measurements": []}
+        return {"id": None, "target": target, "completed": 0, "remaining": target, "measurements": []}
     try:
         with SEQUENCE_STATE.open() as file:
             state = json.load(file)
@@ -128,9 +129,9 @@ def sequence_settings() -> dict[str, int]:
         measurements = state.get("measurements", [])
         if not isinstance(measurements, list):
             raise ValueError("invalid measurement state")
-        return {"target": target, "completed": completed, "remaining": remaining, "measurements": measurements}
+        return {"id": state.get("id"), "target": target, "completed": completed, "remaining": remaining, "measurements": measurements}
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-        return {"target": target, "completed": 0, "remaining": target, "measurements": []}
+        return {"id": None, "target": target, "completed": 0, "remaining": target, "measurements": []}
 
 
 def save_sequence_state(state: dict[str, int]) -> None:
@@ -139,9 +140,15 @@ def save_sequence_state(state: dict[str, int]) -> None:
         file.write("\n")
 
 
-def capture_measurement() -> subprocess.CompletedProcess[str]:
+def capture_measurement(series_id: str | None = None, strike: int | None = None, target_strikes: int | None = None) -> subprocess.CompletedProcess[str]:
+    command = [sys.executable, str(CAPTURE_SCRIPT)]
+    if series_id is not None:
+        command.extend(["--series-id", series_id, "--strike", str(strike), "--target-strikes", str(target_strikes)])
+    energy = calibration_settings()["energy_per_strike_j"]
+    if energy is not None:
+        command.extend(["--energy-per-strike-j", str(energy)])
     return subprocess.run(
-        [sys.executable, str(CAPTURE_SCRIPT)],
+        command,
         cwd=ROOT,
         text=True,
         stdout=subprocess.PIPE,
@@ -150,12 +157,13 @@ def capture_measurement() -> subprocess.CompletedProcess[str]:
     )
 
 
-def measurement_point(strike: int) -> dict[str, float | int | str]:
+def measurement_point(strike: int) -> dict[str, float | int | str | None]:
     measurement = latest_measurement()
     if measurement is None:
         raise RuntimeError("Mätningen sparades inte.")
     fields = ["area_cm2", "equivalent_diameter_mm", "diameter_max_mm", "diameter_min_mm", "captured_at_utc"]
-    return {"strike": strike, **{field: measurement[field] for field in fields}}
+    energy = calibration_settings()["energy_per_strike_j"]
+    return {"strike": strike, "cumulative_input_j": energy * strike if energy is not None else None, **{field: measurement[field] for field in fields}}
 
 
 def sequence_analysis(sequence: dict[str, object]) -> dict[str, object] | None:
@@ -165,11 +173,13 @@ def sequence_analysis(sequence: dict[str, object]) -> dict[str, object] | None:
     first, last = points[0], points[-1]
     area_change = last["area_cm2"] - first["area_cm2"]
     diameter_change = last["equivalent_diameter_mm"] - first["equivalent_diameter_mm"]
+    energy_input_j = last.get("cumulative_input_j")
     if len(points) == 1:
         summary = "Startmätning sparad. Gör en delmätning efter varje slag."
     else:
-        summary = f"Från slag {first['strike']} till {last['strike']}: area {area_change:+.1f} cm² och ekvivalent diameter {diameter_change:+.1f} mm."
-    return {"first": first, "last": last, "area_change": area_change, "diameter_change": diameter_change, "summary": summary}
+        energy_note = f" Tillförd mekanisk energi: {energy_input_j:.3f} J." if energy_input_j is not None else " Energi blir tillgänglig när energi per slag anges vid kalibreringen."
+        summary = f"Från slag {first['strike']} till {last['strike']}: area {area_change:+.1f} cm² och ekvivalent diameter {diameter_change:+.1f} mm.{energy_note}"
+    return {"first": first, "last": last, "area_change": area_change, "diameter_change": diameter_change, "energy_input_j": energy_input_j, "summary": summary}
 
 
 @app.get("/")
@@ -204,10 +214,11 @@ def capture():
 @app.post("/sequence/reset")
 def reset_sequence():
     target = int(calibration_settings()["strikes_per_test"])
-    result = capture_measurement()
+    series_id = f"test_{datetime.now().astimezone().strftime('%Y-%m-%d:%H%M%S')}"
+    result = capture_measurement(series_id, 0, target)
     if result.returncode:
         return jsonify(error=readable_capture_error(result.stdout)), 422
-    state = {"target": target, "completed": 0, "remaining": target, "measurements": [measurement_point(0)]}
+    state = {"id": series_id, "target": target, "completed": 0, "remaining": target, "measurements": [measurement_point(0)]}
     save_sequence_state(state)
     return jsonify(ok=True, **state)
 
@@ -218,7 +229,7 @@ def sequence_step():
     if state["remaining"] == 0:
         return jsonify(error="Slagserien är redan klar. Starta en ny serie."), 409
     # The motor pulse is added here when the driver GPIO pins are configured.
-    result = capture_measurement()
+    result = capture_measurement(state["id"], state["completed"] + 1, state["target"])
     if result.returncode:
         return jsonify(error=readable_capture_error(result.stdout)), 422
     state["completed"] += 1
@@ -234,12 +245,14 @@ def calibrate():
     try:
         diameter = float(data["table_diameter_mm"])
         strikes = int(data.get("strikes_per_test", 15))
+        energy = data.get("energy_per_strike_j")
+        energy = float(energy) if energy is not None else None
     except (KeyError, TypeError, ValueError):
         return jsonify(error="Ange en giltig diameter i millimeter."), 400
-    if diameter <= 0 or strikes <= 0:
-        return jsonify(error="Diametern och antal slag måste vara större än noll."), 400
+    if diameter <= 0 or strikes <= 0 or (energy is not None and energy <= 0):
+        return jsonify(error="Diametern, antal slag och eventuell energi måste vara större än noll."), 400
     result = subprocess.run(
-        [sys.executable, str(CAPTURE_SCRIPT), "--calibrate", "--table-diameter-mm", str(diameter), "--strikes", str(strikes)],
+        [sys.executable, str(CAPTURE_SCRIPT), "--calibrate", "--table-diameter-mm", str(diameter), "--strikes", str(strikes)] + (["--energy-per-strike-j", str(energy)] if energy is not None else []),
         cwd=ROOT,
         text=True,
         stdout=subprocess.PIPE,
