@@ -15,7 +15,7 @@ Kopiera `flowtable.py` till Pi:n och kör:
 python3 flowtable.py
 ```
 
-Programmet tar en 3280 × 2464-bild, hittar den runda bordsskivan (standard Ø300 mm), segmenterar den mörkare betongen och sparar följande i `captures/`:
+Programmet tar en 3280 × 2464-bild, hittar den vita referensskivan (standard Ø297 mm), kompenserar för dess perspektivförvrängning och segmenterar sedan den mörkare betongen. Det sparar följande i `captures/`:
 
 - råbild
 - markerad mätbild

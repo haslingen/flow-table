@@ -28,7 +28,7 @@ except ImportError as error:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--table-diameter-mm", type=float, default=300.0)
+    parser.add_argument("--table-diameter-mm", type=float, default=297.0)
     parser.add_argument("--output", type=Path, default=Path("captures"))
     parser.add_argument(
         "--dark-threshold",
@@ -37,41 +37,77 @@ def parse_args() -> argparse.Namespace:
         help="Pixels darker than this grayscale value are considered concrete (0-255).",
     )
     parser.add_argument(
+        "--table-threshold",
+        type=int,
+        default=150,
+        help="Pixels brighter than this value are used to find the white reference disk.",
+    )
+    parser.add_argument(
         "--warmup-seconds", type=float, default=2.0, help="Camera warm-up time."
     )
     return parser.parse_args()
 
 
-def find_table_circle(image: np.ndarray) -> tuple[int, int, int]:
-    """Return the largest visible circle as x, y, radius in pixels."""
+def find_table_ellipse(image: np.ndarray, threshold: int) -> tuple[tuple[float, float], tuple[float, float], float]:
+    """Find the white reference disk, which may appear elliptical in perspective."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (9, 9), 2)
-    circles = cv2.HoughCircles(
-        gray,
-        cv2.HOUGH_GRADIENT,
-        dp=1.2,
-        minDist=gray.shape[0] // 2,
-        param1=100,
-        param2=35,
-        minRadius=int(min(gray.shape[:2]) * 0.20),
-        maxRadius=int(min(gray.shape[:2]) * 0.49),
-    )
-    if circles is None:
+    _, bright = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    candidates = [contour for contour in contours if len(contour) >= 5 and cv2.contourArea(contour) > 10_000]
+    if not candidates:
         raise RuntimeError(
-            "Bordsskivans runda kant syns inte. Rikta kameran rakt ned och se till "
-            "att hela Ø300 mm-skivan ryms i bilden."
+            "Den vita referensskivan syns inte tydligt. Rikta kameran rakt ned och "
+            "se till att hela skivan ryms i bilden."
         )
-    x, y, radius = max(np.round(circles[0]).astype(int), key=lambda c: c[2])
-    return int(x), int(y), int(radius)
+    return cv2.fitEllipse(max(candidates, key=cv2.contourArea))
 
 
-def measure(image: np.ndarray, table_diameter_mm: float, threshold: int) -> dict[str, object]:
-    center_x, center_y, table_radius_px = find_table_circle(image)
-    px_per_mm = (2 * table_radius_px) / table_diameter_mm
+def table_geometry(ellipse: tuple[tuple[float, float], tuple[float, float], float], diameter_mm: float) -> dict[str, object]:
+    """Normalize OpenCV's ellipse representation to major/minor table axes."""
+    center, (axis_a, axis_b), angle = ellipse
+    if axis_a >= axis_b:
+        major_px, minor_px, major_angle = axis_a, axis_b, angle
+    else:
+        major_px, minor_px, major_angle = axis_b, axis_a, angle + 90
+    radians = np.deg2rad(major_angle)
+    major_direction = np.array([np.cos(radians), np.sin(radians)])
+    minor_direction = np.array([-np.sin(radians), np.cos(radians)])
+    return {
+        "center": np.array(center),
+        "ellipse": ellipse,
+        "major_px": major_px,
+        "minor_px": minor_px,
+        "major_direction": major_direction,
+        "minor_direction": minor_direction,
+        "major_px_per_mm": major_px / diameter_mm,
+        "minor_px_per_mm": minor_px / diameter_mm,
+    }
+
+
+def contour_in_mm(contour: np.ndarray, geometry: dict[str, object]) -> np.ndarray:
+    """Convert image points to table-plane millimetres using the reference ellipse."""
+    points = contour.reshape(-1, 2).astype(np.float32) - geometry["center"]
+    major = points @ geometry["major_direction"] / geometry["major_px_per_mm"]
+    minor = points @ geometry["minor_direction"] / geometry["minor_px_per_mm"]
+    return np.column_stack((major, minor)).astype(np.float32).reshape(-1, 1, 2)
+
+
+def measure(image: np.ndarray, table_diameter_mm: float, threshold: int, table_threshold: int) -> dict[str, object]:
+    geometry = table_geometry(find_table_ellipse(image, table_threshold), table_diameter_mm)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     table_mask = np.zeros(gray.shape, dtype=np.uint8)
-    cv2.circle(table_mask, (center_x, center_y), int(table_radius_px * 0.96), 255, -1)
+    center, axes, angle = geometry["ellipse"]
+    cv2.ellipse(
+        table_mask,
+        tuple(map(int, center)),
+        tuple(int(value * 0.96 / 2) for value in axes),
+        angle,
+        0,
+        360,
+        255,
+        -1,
+    )
     concrete_mask = cv2.inRange(gray, 0, threshold)
     concrete_mask = cv2.bitwise_and(concrete_mask, table_mask)
     concrete_mask = cv2.morphologyEx(
@@ -93,16 +129,15 @@ def measure(image: np.ndarray, table_diameter_mm: float, threshold: int) -> dict
     if area_px < 100:
         raise RuntimeError("Detected concrete area is too small.")
 
-    (_, _), (axis_a, axis_b), angle = cv2.fitEllipse(contour)
-    diameter_max_mm = max(axis_a, axis_b) / px_per_mm
-    diameter_min_mm = min(axis_a, axis_b) / px_per_mm
-    area_mm2 = area_px / (px_per_mm**2)
+    physical_contour = contour_in_mm(contour, geometry)
+    (_, _), (axis_a, axis_b), angle = cv2.fitEllipse(physical_contour)
+    diameter_max_mm = max(axis_a, axis_b)
+    diameter_min_mm = min(axis_a, axis_b)
+    area_mm2 = cv2.contourArea(physical_contour)
     equivalent_diameter_mm = (4 * area_mm2 / np.pi) ** 0.5
     return {
-        "table_center_x_px": center_x,
-        "table_center_y_px": center_y,
-        "table_radius_px": table_radius_px,
-        "pixels_per_mm": px_per_mm,
+        "table_ellipse": geometry["ellipse"],
+        "pixels_per_mm": (geometry["major_px_per_mm"] * geometry["minor_px_per_mm"]) ** 0.5,
         "area_mm2": area_mm2,
         "area_cm2": area_mm2 / 100,
         "equivalent_diameter_mm": equivalent_diameter_mm,
@@ -118,10 +153,14 @@ def render_result(image: np.ndarray, result: dict[str, object]) -> np.ndarray:
     rendered = image.copy()
     contour = result["contour"]
     cv2.drawContours(rendered, [contour], -1, (0, 220, 0), 3)
-    cv2.circle(
+    center, axes, angle = result["table_ellipse"]
+    cv2.ellipse(
         rendered,
-        (int(result["table_center_x_px"]), int(result["table_center_y_px"])),
-        int(result["table_radius_px"]),
+        tuple(map(int, center)),
+        tuple(int(value / 2) for value in axes),
+        angle,
+        0,
+        360,
         (255, 120, 0),
         2,
     )
@@ -163,7 +202,7 @@ def main() -> None:
     raw_path = args.output / f"{captured_at}_raw.jpg"
     cv2.imwrite(str(raw_path), image)
     try:
-        result = measure(image, args.table_diameter_mm, args.dark_threshold)
+        result = measure(image, args.table_diameter_mm, args.dark_threshold, args.table_threshold)
     except RuntimeError as error:
         sys.exit(f"Saved raw image to {raw_path}; measurement failed: {error}")
 
