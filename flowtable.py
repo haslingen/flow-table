@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import sys
 import time
@@ -28,7 +29,11 @@ except ImportError as error:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--table-diameter-mm", type=float, default=297.0)
+    parser.add_argument(
+        "--table-diameter-mm",
+        type=float,
+        help="The largest real diameter of the white reference disk in millimetres.",
+    )
     parser.add_argument("--output", type=Path, default=Path("captures"))
     parser.add_argument(
         "--dark-threshold",
@@ -42,10 +47,41 @@ def parse_args() -> argparse.Namespace:
         default=150,
         help="Pixels brighter than this value are used to find the white reference disk.",
     )
+    parser.add_argument("--calibration-file", type=Path, default=Path("calibration.json"))
+    parser.add_argument(
+        "--calibrate",
+        action="store_true",
+        help="Save the reference disk's largest diameter for later measurements.",
+    )
     parser.add_argument(
         "--warmup-seconds", type=float, default=2.0, help="Camera warm-up time."
     )
     return parser.parse_args()
+
+
+def load_calibration(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {"table_diameter_mm": 297.0}
+    try:
+        with path.open() as file:
+            data = json.load(file)
+        return {"table_diameter_mm": float(data["table_diameter_mm"]), **data}
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Could not read calibration file {path}: {error}") from error
+
+
+def save_calibration(path: Path, table_diameter_mm: float, ellipse: tuple[tuple[float, float], tuple[float, float], float]) -> None:
+    center, axes, angle = ellipse
+    data = {
+        "table_diameter_mm": table_diameter_mm,
+        "calibrated_at_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+        "ellipse_center_px": [round(value, 3) for value in center],
+        "ellipse_axes_px": [round(value, 3) for value in axes],
+        "ellipse_angle_deg": round(angle, 3),
+    }
+    with path.open("w") as file:
+        json.dump(data, file, indent=2)
+        file.write("\n")
 
 
 def find_table_ellipse(image: np.ndarray, threshold: int) -> tuple[tuple[float, float], tuple[float, float], float]:
@@ -175,6 +211,16 @@ def render_result(image: np.ndarray, result: dict[str, object]) -> np.ndarray:
     return rendered
 
 
+def render_calibration(image: np.ndarray, ellipse: tuple[tuple[float, float], tuple[float, float], float], diameter_mm: float) -> np.ndarray:
+    rendered = image.copy()
+    center, axes, angle = ellipse
+    cv2.ellipse(rendered, tuple(map(int, center)), tuple(int(value / 2) for value in axes), angle, 0, 360, (255, 120, 0), 3)
+    label = f"Kalibrerad: storsta diameter {diameter_mm:.1f} mm"
+    cv2.putText(rendered, label, (30, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 20, 20), 5)
+    cv2.putText(rendered, label, (30, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    return rendered
+
+
 def append_csv(path: Path, captured_at: str, result: dict[str, object]) -> None:
     fields = ["captured_at_utc", "area_cm2", "equivalent_diameter_mm", "diameter_max_mm", "diameter_min_mm", "pixels_per_mm"]
     new_file = not path.exists()
@@ -189,6 +235,10 @@ def main() -> None:
     args = parse_args()
     if not 0 <= args.dark_threshold <= 255:
         sys.exit("--dark-threshold must be between 0 and 255.")
+    calibration = load_calibration(args.calibration_file)
+    table_diameter_mm = args.table_diameter_mm or float(calibration["table_diameter_mm"])
+    if table_diameter_mm <= 0:
+        sys.exit("--table-diameter-mm must be positive.")
     args.output.mkdir(parents=True, exist_ok=True)
 
     camera = Picamera2()
@@ -201,8 +251,19 @@ def main() -> None:
     captured_at = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     raw_path = args.output / f"{captured_at}_raw.jpg"
     cv2.imwrite(str(raw_path), image)
+    if args.calibrate:
+        try:
+            ellipse = find_table_ellipse(image, args.table_threshold)
+        except RuntimeError as error:
+            sys.exit(f"Saved raw image to {raw_path}; calibration failed: {error}")
+        save_calibration(args.calibration_file, table_diameter_mm, ellipse)
+        calibration_path = args.output / f"{captured_at}_calibration.jpg"
+        cv2.imwrite(str(calibration_path), render_calibration(image, ellipse, table_diameter_mm))
+        print(f"Calibration image: {calibration_path}")
+        print(f"Saved maximum table diameter: {table_diameter_mm:.1f} mm")
+        return
     try:
-        result = measure(image, args.table_diameter_mm, args.dark_threshold, args.table_threshold)
+        result = measure(image, table_diameter_mm, args.dark_threshold, args.table_threshold)
     except RuntimeError as error:
         sys.exit(f"Saved raw image to {raw_path}; measurement failed: {error}")
 

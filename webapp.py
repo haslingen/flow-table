@@ -10,13 +10,14 @@ import re
 import subprocess
 import sys
 
-from flask import Flask, jsonify, render_template_string, send_from_directory
+from flask import Flask, jsonify, render_template_string, request, send_from_directory
 
 
 ROOT = Path(__file__).resolve().parent
 CAPTURES = ROOT / "captures"
 MEASUREMENTS = CAPTURES / "measurements.csv"
 CAPTURE_SCRIPT = ROOT / "flowtable.py"
+CALIBRATION = ROOT / "calibration.json"
 
 app = Flask(__name__)
 
@@ -39,7 +40,8 @@ PAGE = """<!doctype html>
   </style>
 </head>
 <body><main>
-  <header><div><h1>FlowTable</h1><p class="sub">Senaste kameramätningen från slagbordet</p></div><button id="capture">Ta ny mätning</button></header>
+  <header><div><h1>FlowTable</h1><p class="sub">Senaste kameramätningen från slagbordet</p></div><div><button id="capture">Ta ny mätning</button></div></header>
+  <section class="card" style="margin-bottom:16px"><form id="calibrate"><strong>Kalibrering</strong><div class="label" style="margin:6px 0 10px">Lämna den vita skivan tom. Ange dess största verkliga diameter och välj Kalibrera.</div><label for="diameter">Största diameter (mm)</label> <input id="diameter" type="number" min="1" step="0.1" value="{{ calibration.table_diameter_mm }}" required> <button type="submit" style="margin-left:8px">Kalibrera</button></form></section>
   <p id="status">{{ status }}</p>
   {% if measurement %}
   <section class="stats">
@@ -51,8 +53,9 @@ PAGE = """<!doctype html>
   <section class="image-card"><img src="/captures/{{ image }}?v={{ measurement.captured_at_utc }}" alt="Senaste markerade kamerabild"><footer>Mätt {{ measurement.captured_at_display }} UTC</footer></section>
   {% else %}<section class="image-card empty">Ingen godkänd mätning finns ännu. Rikta kameran mot slagbordet och välj “Ta ny mätning”.</section>{% endif %}
 </main><script>
-const button=document.querySelector('#capture'), status=document.querySelector('#status');
+const button=document.querySelector('#capture'), status=document.querySelector('#status'), calibration=document.querySelector('#calibrate');
 button.addEventListener('click', async () => { button.disabled=true; status.textContent='Tar bild och beräknar utbredningen…'; try { const r=await fetch('/capture',{method:'POST'}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Mätningen misslyckades: '+e.message; button.disabled=false; } });
+calibration.addEventListener('submit', async (event) => { event.preventDefault(); const value=Number(document.querySelector('#diameter').value); if (!(value>0)) return; status.textContent='Tar kalibreringsbild…'; try { const r=await fetch('/calibrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table_diameter_mm:value})}); const data=await r.json(); if (!r.ok) throw new Error(data.error); status.textContent='Kalibreringen är sparad.'; } catch(e) { status.textContent='Kalibreringen misslyckades: '+e.message; } });
 </script></body></html>"""
 
 
@@ -86,6 +89,17 @@ def readable_capture_error(output: str) -> str:
     return "Kamerabilden kunde inte analyseras. Kontrollera att slagbordet syns helt i bilden."
 
 
+def calibration_settings() -> dict[str, float]:
+    if not CALIBRATION.exists():
+        return {"table_diameter_mm": 297.0}
+    try:
+        import json
+        with CALIBRATION.open() as file:
+            return {"table_diameter_mm": float(json.load(file)["table_diameter_mm"])}
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        return {"table_diameter_mm": 297.0}
+
+
 @app.get("/")
 def dashboard():
     measurement = latest_measurement()
@@ -93,6 +107,7 @@ def dashboard():
         PAGE,
         measurement=measurement,
         image=measured_image(measurement),
+        calibration=calibration_settings(),
         status="Klar" if measurement else "Väntar på första mätningen",
     )
 
@@ -106,6 +121,28 @@ def capture_file(filename: str):
 def capture():
     result = subprocess.run(
         [sys.executable, str(CAPTURE_SCRIPT)],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=60,
+    )
+    if result.returncode:
+        return jsonify(error=readable_capture_error(result.stdout)), 422
+    return jsonify(ok=True, output=result.stdout)
+
+
+@app.post("/calibrate")
+def calibrate():
+    data = request.get_json(silent=True) or {}
+    try:
+        diameter = float(data["table_diameter_mm"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify(error="Ange en giltig diameter i millimeter."), 400
+    if diameter <= 0:
+        return jsonify(error="Diametern måste vara större än noll."), 400
+    result = subprocess.run(
+        [sys.executable, str(CAPTURE_SCRIPT), "--calibrate", "--table-diameter-mm", str(diameter)],
         cwd=ROOT,
         text=True,
         stdout=subprocess.PIPE,
