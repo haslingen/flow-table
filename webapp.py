@@ -41,7 +41,7 @@ PAGE = """<!doctype html>
 </head>
 <body><main>
   <header><div><h1>FlowTable</h1><p class="sub">Senaste kameramätningen från slagbordet</p></div><div><button id="capture">Ta ny mätning</button></div></header>
-  <section class="card" style="margin-bottom:16px"><form id="calibrate"><strong>Kalibrering</strong><div class="label" style="margin:6px 0 10px">Lämna den vita skivan tom. Ange dess största verkliga diameter och välj Kalibrera.</div><label for="diameter">Största diameter (mm)</label> <input id="diameter" type="number" min="1" step="0.1" value="{{ calibration.table_diameter_mm }}" required> <button type="submit" style="margin-left:8px">Kalibrera</button></form></section>
+  <section class="card" style="margin-bottom:16px"><form id="calibrate"><strong>Kalibrering</strong><div class="label" style="margin:6px 0 10px">Lämna den vita skivan tom. Ange dess största verkliga diameter och antal slag för ett test.</div><label for="diameter">Största diameter (mm)</label> <input id="diameter" type="number" min="1" step="0.1" value="{{ calibration.table_diameter_mm }}" required> <label for="strikes" style="margin-left:12px">Antal slag</label> <input id="strikes" type="number" min="1" step="1" value="{{ calibration.strikes_per_test }}" required> <button type="submit" style="margin-left:8px">Kalibrera</button></form></section>
   <p id="status">{{ status }}</p>
   {% if measurement %}
   <section class="stats">
@@ -56,7 +56,7 @@ PAGE = """<!doctype html>
 </main><script>
 const button=document.querySelector('#capture'), status=document.querySelector('#status'), calibration=document.querySelector('#calibrate');
 button.addEventListener('click', async () => { button.disabled=true; status.textContent='Tar bild och beräknar utbredningen…'; try { const r=await fetch('/capture',{method:'POST'}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Mätningen misslyckades: '+e.message; button.disabled=false; } });
-calibration.addEventListener('submit', async (event) => { event.preventDefault(); const value=Number(document.querySelector('#diameter').value); if (!(value>0)) return; status.textContent='Tar kalibreringsbild…'; try { const r=await fetch('/calibrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table_diameter_mm:value})}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Kalibreringen misslyckades: '+e.message; } });
+calibration.addEventListener('submit', async (event) => { event.preventDefault(); const value=Number(document.querySelector('#diameter').value), strikes=Number(document.querySelector('#strikes').value); if (!(value>0 && Number.isInteger(strikes) && strikes>0)) return; status.textContent='Tar kalibreringsbild…'; try { const r=await fetch('/calibrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table_diameter_mm:value,strikes_per_test:strikes})}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Kalibreringen misslyckades: '+e.message; } });
 </script></body></html>"""
 
 
@@ -97,13 +97,14 @@ def readable_capture_error(output: str) -> str:
 
 def calibration_settings() -> dict[str, float]:
     if not CALIBRATION.exists():
-        return {"table_diameter_mm": 297.0}
+        return {"table_diameter_mm": 297.0, "strikes_per_test": 15}
     try:
         import json
         with CALIBRATION.open() as file:
-            return {"table_diameter_mm": float(json.load(file)["table_diameter_mm"])}
+            data = json.load(file)
+            return {"table_diameter_mm": float(data["table_diameter_mm"]), "strikes_per_test": int(data.get("strikes_per_test", 15))}
     except (OSError, ValueError, KeyError, json.JSONDecodeError):
-        return {"table_diameter_mm": 297.0}
+        return {"table_diameter_mm": 297.0, "strikes_per_test": 15}
 
 
 @app.get("/")
@@ -144,12 +145,13 @@ def calibrate():
     data = request.get_json(silent=True) or {}
     try:
         diameter = float(data["table_diameter_mm"])
+        strikes = int(data.get("strikes_per_test", 15))
     except (KeyError, TypeError, ValueError):
         return jsonify(error="Ange en giltig diameter i millimeter."), 400
-    if diameter <= 0:
-        return jsonify(error="Diametern måste vara större än noll."), 400
+    if diameter <= 0 or strikes <= 0:
+        return jsonify(error="Diametern och antal slag måste vara större än noll."), 400
     result = subprocess.run(
-        [sys.executable, str(CAPTURE_SCRIPT), "--calibrate", "--table-diameter-mm", str(diameter)],
+        [sys.executable, str(CAPTURE_SCRIPT), "--calibrate", "--table-diameter-mm", str(diameter), "--strikes", str(strikes)],
         cwd=ROOT,
         text=True,
         stdout=subprocess.PIPE,

@@ -49,6 +49,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--calibration-file", type=Path, default=Path("calibration.json"))
     parser.add_argument(
+        "--strikes",
+        type=int,
+        help="Number of motor strikes in one test. Defaults to 15.",
+    )
+    parser.add_argument(
         "--calibrate",
         action="store_true",
         help="Save the reference disk's largest diameter for later measurements.",
@@ -61,19 +66,25 @@ def parse_args() -> argparse.Namespace:
 
 def load_calibration(path: Path) -> dict[str, object]:
     if not path.exists():
-        return {"table_diameter_mm": 297.0}
+        return {"table_diameter_mm": 297.0, "strikes_per_test": 15}
     try:
         with path.open() as file:
             data = json.load(file)
-        return {"table_diameter_mm": float(data["table_diameter_mm"]), **data}
+        return {"table_diameter_mm": float(data["table_diameter_mm"]), "strikes_per_test": 15, **data}
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
         raise RuntimeError(f"Could not read calibration file {path}: {error}") from error
 
 
-def save_calibration(path: Path, table_diameter_mm: float, ellipse: tuple[tuple[float, float], tuple[float, float], float]) -> None:
+def save_calibration(
+    path: Path,
+    table_diameter_mm: float,
+    strikes_per_test: int,
+    ellipse: tuple[tuple[float, float], tuple[float, float], float],
+) -> None:
     center, axes, angle = ellipse
     data = {
         "table_diameter_mm": table_diameter_mm,
+        "strikes_per_test": strikes_per_test,
         "calibrated_at_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
         "ellipse_center_px": [round(value, 3) for value in center],
         "ellipse_axes_px": [round(value, 3) for value in axes],
@@ -269,8 +280,11 @@ def main() -> None:
         sys.exit("--dark-threshold must be between 0 and 255.")
     calibration = load_calibration(args.calibration_file)
     table_diameter_mm = args.table_diameter_mm or float(calibration["table_diameter_mm"])
+    strikes_per_test = args.strikes if args.strikes is not None else int(calibration["strikes_per_test"])
     if table_diameter_mm <= 0:
         sys.exit("--table-diameter-mm must be positive.")
+    if strikes_per_test <= 0:
+        sys.exit("--strikes must be a positive integer.")
     args.output.mkdir(parents=True, exist_ok=True)
 
     camera = Picamera2()
@@ -288,11 +302,12 @@ def main() -> None:
             ellipse = find_table_ellipse(image, args.table_threshold)
         except RuntimeError as error:
             sys.exit(f"Saved raw image to {raw_path}; calibration failed: {error}")
-        save_calibration(args.calibration_file, table_diameter_mm, ellipse)
+        save_calibration(args.calibration_file, table_diameter_mm, strikes_per_test, ellipse)
         calibration_path = args.output / f"{captured_at}_calibration.jpg"
         cv2.imwrite(str(calibration_path), render_calibration(image, ellipse, table_diameter_mm))
         print(f"Calibration image: {calibration_path}")
         print(f"Saved maximum table diameter: {table_diameter_mm:.1f} mm")
+        print(f"Saved strikes per test: {strikes_per_test}")
         return
     try:
         result = measure(

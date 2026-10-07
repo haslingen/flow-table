@@ -34,3 +34,5 @@ sudo systemctl enable --now flowtable-web
 ```
 
 Öppna sedan `http://lasersensor:8767` eller `http://192.168.1.211:8767` på det lokala nätverket.
+
+Kalibreringspanelen sparar också antalet slag i en mätserie. Standardvärdet är 15.
