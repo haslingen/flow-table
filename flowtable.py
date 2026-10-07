@@ -178,12 +178,21 @@ def measure(
     )
 
     contours, _ = cv2.findContours(concrete_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        raise RuntimeError("No dark concrete area found; adjust --dark-threshold or lighting.")
-    contour = max(contours, key=cv2.contourArea)
-    area_px = cv2.contourArea(contour)
-    if area_px < 100:
-        raise RuntimeError("Detected concrete area is too small.")
+    contour = max(contours, key=cv2.contourArea) if contours else None
+    area_px = cv2.contourArea(contour) if contour is not None else 0
+    if contour is None or area_px < 100 or len(contour) < 5:
+        return {
+            "table_ellipse": geometry["ellipse"],
+            "pixels_per_mm": (geometry["major_px_per_mm"] * geometry["minor_px_per_mm"]) ** 0.5,
+            "area_mm2": 0.0,
+            "area_cm2": 0.0,
+            "equivalent_diameter_mm": 0.0,
+            "diameter_max_mm": 0.0,
+            "diameter_min_mm": 0.0,
+            "ellipse_angle_deg": 0.0,
+            "concrete_mask": concrete_mask,
+            "contour": None,
+        }
 
     physical_contour = contour_in_mm(contour, geometry)
     (_, _), (axis_a, axis_b), angle = cv2.fitEllipse(physical_contour)
@@ -208,7 +217,8 @@ def measure(
 def render_result(image: np.ndarray, result: dict[str, object]) -> np.ndarray:
     rendered = image.copy()
     contour = result["contour"]
-    cv2.drawContours(rendered, [contour], -1, (0, 220, 0), 3)
+    if contour is not None:
+        cv2.drawContours(rendered, [contour], -1, (0, 220, 0), 3)
     center, axes, angle = result["table_ellipse"]
     cv2.ellipse(
         rendered,
@@ -221,11 +231,13 @@ def render_result(image: np.ndarray, result: dict[str, object]) -> np.ndarray:
         2,
     )
     lines = [
-        f"Area: {result['area_cm2']:.1f} cm2",
-        f"Deq: {result['equivalent_diameter_mm']:.1f} mm",
-        f"Dmax/Dmin: {result['diameter_max_mm']:.1f} / {result['diameter_min_mm']:.1f} mm",
+        "Ingen betong hittad - kalibrerad skiva visas" if contour is None else f"Area: {result['area_cm2']:.1f} cm2",
+        "" if contour is None else f"Deq: {result['equivalent_diameter_mm']:.1f} mm",
+        "" if contour is None else f"Dmax/Dmin: {result['diameter_max_mm']:.1f} / {result['diameter_min_mm']:.1f} mm",
     ]
     for index, line in enumerate(lines):
+        if not line:
+            continue
         cv2.putText(rendered, line, (30, 45 + index * 36), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (20, 20, 20), 5)
         cv2.putText(rendered, line, (30, 45 + index * 36), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
     return rendered

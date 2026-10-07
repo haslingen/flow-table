@@ -115,7 +115,7 @@ def dashboard():
         image=measured_image(measurement),
         calibration_image=latest_calibration_image(),
         calibration=calibration_settings(),
-        status="Klar" if measurement else "Väntar på första mätningen",
+        status=("Ingen betong upptäcktes — den kalibrerade skivan visas." if measurement and measurement["area_cm2"] == 0 else "Klar") if measurement else "Väntar på första mätningen",
     )
 
 
