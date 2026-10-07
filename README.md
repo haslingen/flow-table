@@ -15,7 +15,7 @@ Kopiera `flowtable.py` till Pi:n och kör:
 python3 flowtable.py
 ```
 
-Programmet tar en 3280 × 2464-bild, hittar den vita referensskivan (standard Ø297 mm), kompenserar för dess perspektivförvrängning och segmenterar sedan den mörkare betongen. Det sparar följande i `captures/`:
+Programmet tar en 3280 × 2464-bild, och använder den kalibrerade vita referensskivan som **297 × 297 mm**. Referensskivans ellips i kamerabilden omvandlas till en cirkel i bordets plan, så att perspektivförvrängningen kompenseras före segmenteringen av den mörkare betongen. Det sparar följande i `captures/`:
 
 - råbild
 - markerad mätbild

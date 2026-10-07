@@ -84,6 +84,19 @@ def save_calibration(path: Path, table_diameter_mm: float, ellipse: tuple[tuple[
         file.write("\n")
 
 
+def saved_ellipse(calibration: dict[str, object]) -> tuple[tuple[float, float], tuple[float, float], float] | None:
+    """Return the reference-disk image geometry captured during calibration."""
+    try:
+        center = tuple(float(value) for value in calibration["ellipse_center_px"])
+        axes = tuple(float(value) for value in calibration["ellipse_axes_px"])
+        angle = float(calibration["ellipse_angle_deg"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if len(center) != 2 or len(axes) != 2 or min(axes) <= 0:
+        return None
+    return center, axes, angle
+
+
 def find_table_ellipse(image: np.ndarray, threshold: int) -> tuple[tuple[float, float], tuple[float, float], float]:
     """Find the white reference disk, which may appear elliptical in perspective."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -128,8 +141,15 @@ def contour_in_mm(contour: np.ndarray, geometry: dict[str, object]) -> np.ndarra
     return np.column_stack((major, minor)).astype(np.float32).reshape(-1, 1, 2)
 
 
-def measure(image: np.ndarray, table_diameter_mm: float, threshold: int, table_threshold: int) -> dict[str, object]:
-    geometry = table_geometry(find_table_ellipse(image, table_threshold), table_diameter_mm)
+def measure(
+    image: np.ndarray,
+    table_diameter_mm: float,
+    threshold: int,
+    table_threshold: int,
+    reference_ellipse: tuple[tuple[float, float], tuple[float, float], float] | None = None,
+) -> dict[str, object]:
+    ellipse = reference_ellipse or find_table_ellipse(image, table_threshold)
+    geometry = table_geometry(ellipse, table_diameter_mm)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     table_mask = np.zeros(gray.shape, dtype=np.uint8)
@@ -263,7 +283,13 @@ def main() -> None:
         print(f"Saved maximum table diameter: {table_diameter_mm:.1f} mm")
         return
     try:
-        result = measure(image, table_diameter_mm, args.dark_threshold, args.table_threshold)
+        result = measure(
+            image,
+            table_diameter_mm,
+            args.dark_threshold,
+            args.table_threshold,
+            saved_ellipse(calibration),
+        )
     except RuntimeError as error:
         sys.exit(f"Saved raw image to {raw_path}; measurement failed: {error}")
 
