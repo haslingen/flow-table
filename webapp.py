@@ -38,6 +38,7 @@ PAGE = """<!doctype html>
     .label { color:var(--muted); font-size:13px; margin-bottom:5px } .value { font-size:25px; font-weight:700 } .unit { color:var(--muted); font-size:14px }
     .image-card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px } img { display:block; width:100%; max-height:680px; object-fit:contain; background:#050607; border-radius:6px }
     .empty { color:var(--muted); padding:64px 10px; text-align:center } footer { color:var(--muted); font-size:13px; margin-top:12px }
+    table { width:100%; border-collapse:collapse; margin-top:12px } th,td { text-align:right; padding:9px 7px; border-bottom:1px solid var(--line) } th:first-child,td:first-child { text-align:left }
     @media (max-width:700px) { header { align-items:flex-start; flex-direction:column } .stats { grid-template-columns:repeat(2,minmax(0,1fr)) } }
   </style>
 </head>
@@ -45,6 +46,7 @@ PAGE = """<!doctype html>
   <header><div><h1>FlowTable</h1><p class="sub">Senaste kameramätningen från slagbordet</p></div><div><button id="capture">Ta ny mätning</button></div></header>
   <section class="card" style="margin-bottom:16px"><form id="calibrate"><strong>Kalibrering</strong><div class="label" style="margin:6px 0 10px">Lämna den vita skivan tom. Ange dess största verkliga diameter och antal slag för ett test.</div><label for="diameter">Största diameter (mm)</label> <input id="diameter" type="number" min="1" step="0.1" value="{{ calibration.table_diameter_mm }}" required> <label for="strikes" style="margin-left:12px">Antal slag</label> <input id="strikes" type="number" min="1" step="1" value="{{ calibration.strikes_per_test }}" required> <button type="submit" style="margin-left:8px">Kalibrera</button></form></section>
   <section class="card" style="margin-bottom:16px"><strong>Slagserie</strong><div class="label" style="margin:6px 0 10px">Delmätning sparar en bild efter ett slag och räknar ned serien.</div><div class="value">{{ sequence.remaining }} <span class="unit">slag kvar av {{ sequence.target }}</span></div><div style="margin-top:12px"><button id="reset-series">Ny serie</button> <button id="partial" {% if sequence.remaining == 0 %}disabled{% endif %}>Delmätning · {{ sequence.remaining }} kvar</button></div></section>
+  {% if analysis %}<section class="card" style="margin-bottom:16px"><h2 style="font-size:17px;margin:0 0 6px">Analys av aktuell slagserie</h2><div class="label">{{ analysis.summary }}</div><section class="stats" style="margin:14px 0 0"><div class="card"><div class="label">Areaförändring</div><div class="value">{{ analysis.area_change|round(1) }} <span class="unit">cm²</span></div></div><div class="card"><div class="label">Diameterförändring</div><div class="value">{{ analysis.diameter_change|round(1) }} <span class="unit">mm</span></div></div><div class="card"><div class="label">Senaste area</div><div class="value">{{ analysis.last.area_cm2|round(1) }} <span class="unit">cm²</span></div></div></section><table><thead><tr><th>Slag</th><th>Area</th><th>Ekv. Ø</th><th>Max Ø</th><th>Min Ø</th></tr></thead><tbody>{% for point in sequence.measurements %}<tr><td>{{ point.strike }}</td><td>{{ point.area_cm2|round(1) }} cm²</td><td>{{ point.equivalent_diameter_mm|round(1) }} mm</td><td>{{ point.diameter_max_mm|round(1) }} mm</td><td>{{ point.diameter_min_mm|round(1) }} mm</td></tr>{% endfor %}</tbody></table></section>{% endif %}
   <p id="status">{{ status }}</p>
   {% if measurement %}
   <section class="stats">
@@ -114,7 +116,7 @@ def calibration_settings() -> dict[str, float]:
 def sequence_settings() -> dict[str, int]:
     target = int(calibration_settings()["strikes_per_test"])
     if not SEQUENCE_STATE.exists():
-        return {"target": target, "completed": 0, "remaining": target}
+        return {"target": target, "completed": 0, "remaining": target, "measurements": []}
     try:
         with SEQUENCE_STATE.open() as file:
             state = json.load(file)
@@ -123,9 +125,12 @@ def sequence_settings() -> dict[str, int]:
         remaining = int(state["remaining"])
         if target <= 0 or completed < 0 or remaining < 0 or completed + remaining != target:
             raise ValueError("invalid sequence state")
-        return {"target": target, "completed": completed, "remaining": remaining}
+        measurements = state.get("measurements", [])
+        if not isinstance(measurements, list):
+            raise ValueError("invalid measurement state")
+        return {"target": target, "completed": completed, "remaining": remaining, "measurements": measurements}
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-        return {"target": target, "completed": 0, "remaining": target}
+        return {"target": target, "completed": 0, "remaining": target, "measurements": []}
 
 
 def save_sequence_state(state: dict[str, int]) -> None:
@@ -145,16 +150,40 @@ def capture_measurement() -> subprocess.CompletedProcess[str]:
     )
 
 
+def measurement_point(strike: int) -> dict[str, float | int | str]:
+    measurement = latest_measurement()
+    if measurement is None:
+        raise RuntimeError("Mätningen sparades inte.")
+    fields = ["area_cm2", "equivalent_diameter_mm", "diameter_max_mm", "diameter_min_mm", "captured_at_utc"]
+    return {"strike": strike, **{field: measurement[field] for field in fields}}
+
+
+def sequence_analysis(sequence: dict[str, object]) -> dict[str, object] | None:
+    points = sequence["measurements"]
+    if not points:
+        return None
+    first, last = points[0], points[-1]
+    area_change = last["area_cm2"] - first["area_cm2"]
+    diameter_change = last["equivalent_diameter_mm"] - first["equivalent_diameter_mm"]
+    if len(points) == 1:
+        summary = "Startmätning sparad. Gör en delmätning efter varje slag."
+    else:
+        summary = f"Från slag {first['strike']} till {last['strike']}: area {area_change:+.1f} cm² och ekvivalent diameter {diameter_change:+.1f} mm."
+    return {"first": first, "last": last, "area_change": area_change, "diameter_change": diameter_change, "summary": summary}
+
+
 @app.get("/")
 def dashboard():
     measurement = latest_measurement()
+    sequence = sequence_settings()
     return render_template_string(
         PAGE,
         measurement=measurement,
         image=measured_image(measurement),
         calibration_image=latest_calibration_image(),
         calibration=calibration_settings(),
-        sequence=sequence_settings(),
+        sequence=sequence,
+        analysis=sequence_analysis(sequence),
         status=("Ingen betong upptäcktes — den kalibrerade skivan visas." if measurement and measurement["area_cm2"] == 0 else "Klar") if measurement else "Väntar på första mätningen",
     )
 
@@ -175,7 +204,10 @@ def capture():
 @app.post("/sequence/reset")
 def reset_sequence():
     target = int(calibration_settings()["strikes_per_test"])
-    state = {"target": target, "completed": 0, "remaining": target}
+    result = capture_measurement()
+    if result.returncode:
+        return jsonify(error=readable_capture_error(result.stdout)), 422
+    state = {"target": target, "completed": 0, "remaining": target, "measurements": [measurement_point(0)]}
     save_sequence_state(state)
     return jsonify(ok=True, **state)
 
@@ -191,6 +223,7 @@ def sequence_step():
         return jsonify(error=readable_capture_error(result.stdout)), 422
     state["completed"] += 1
     state["remaining"] -= 1
+    state["measurements"].append(measurement_point(state["completed"]))
     save_sequence_state(state)
     return jsonify(ok=True, **state)
 
