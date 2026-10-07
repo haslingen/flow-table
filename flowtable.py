@@ -53,11 +53,8 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="Number of motor strikes in one test. Defaults to 15.",
     )
-    parser.add_argument(
-        "--energy-per-strike-j",
-        type=float,
-        help="Mechanical energy delivered by one strike in joules, when known.",
-    )
+    parser.add_argument("--impact-mass-kg", type=float, help="Moving mass for one Hägermann strike in kg.")
+    parser.add_argument("--drop-height-mm", type=float, help="Drop height per strike in mm (normally 10 mm).")
     parser.add_argument("--series-id", help="Identifier for the active strike series.")
     parser.add_argument("--strike", type=int, help="Current strike number; the baseline is 0.")
     parser.add_argument("--target-strikes", type=int, help="Total configured strikes in the series.")
@@ -75,11 +72,11 @@ def parse_args() -> argparse.Namespace:
 
 def load_calibration(path: Path) -> dict[str, object]:
     if not path.exists():
-        return {"table_diameter_mm": 297.0, "strikes_per_test": 15, "energy_per_strike_j": None}
+        return {"table_diameter_mm": 297.0, "strikes_per_test": 15, "impact_mass_kg": 4.0, "drop_height_mm": 10.0}
     try:
         with path.open() as file:
             data = json.load(file)
-        return {"table_diameter_mm": float(data["table_diameter_mm"]), "strikes_per_test": 15, "energy_per_strike_j": None, **data}
+        return {"table_diameter_mm": float(data["table_diameter_mm"]), "strikes_per_test": 15, "impact_mass_kg": 4.0, "drop_height_mm": 10.0, **data}
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
         raise RuntimeError(f"Could not read calibration file {path}: {error}") from error
 
@@ -88,14 +85,16 @@ def save_calibration(
     path: Path,
     table_diameter_mm: float,
     strikes_per_test: int,
-    energy_per_strike_j: float | None,
+    impact_mass_kg: float,
+    drop_height_mm: float,
     ellipse: tuple[tuple[float, float], tuple[float, float], float],
 ) -> None:
     center, axes, angle = ellipse
     data = {
         "table_diameter_mm": table_diameter_mm,
         "strikes_per_test": strikes_per_test,
-        "energy_per_strike_j": energy_per_strike_j,
+        "impact_mass_kg": impact_mass_kg,
+        "drop_height_mm": drop_height_mm,
         "calibrated_at_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
         "ellipse_center_px": [round(value, 3) for value in center],
         "ellipse_axes_px": [round(value, 3) for value in axes],
@@ -293,7 +292,8 @@ def write_data_record(
     result: dict[str, object],
     calibration: dict[str, object],
     table_diameter_mm: float,
-    energy_per_strike_j: float | None,
+    impact_mass_kg: float,
+    drop_height_mm: float,
     args: argparse.Namespace,
 ) -> Path:
     """Store one portable, timestamped record for every measured camera image."""
@@ -305,7 +305,8 @@ def write_data_record(
     if record_path.exists():
         record_path = day_directory / f"data_{local_time.strftime('%Y-%m-%d:%H%M%S')}_{local_time.microsecond:06d}.json"
     center, axes, angle = result["table_ellipse"]
-    cumulative_energy = energy_per_strike_j * args.strike if energy_per_strike_j is not None and args.strike is not None else None
+    gravitational_energy_per_strike = impact_mass_kg * 9.80665 * drop_height_mm / 1000
+    cumulative_energy = gravitational_energy_per_strike * args.strike if args.strike is not None else None
     record = {
         "schema_version": 1,
         "measurement_id": record_path.stem,
@@ -322,7 +323,12 @@ def write_data_record(
             "calibrated_at_utc": calibration.get("calibrated_at_utc"),
         },
         "sequence": {"id": args.series_id, "strike": args.strike, "target_strikes": args.target_strikes},
-        "energy": {"per_strike_j": energy_per_strike_j, "cumulative_input_j": cumulative_energy},
+        "energy": {
+            "impact_mass_kg": impact_mass_kg,
+            "drop_height_mm": drop_height_mm,
+            "gravitational_energy_per_strike_j": gravitational_energy_per_strike,
+            "cumulative_gravitational_energy_j": cumulative_energy,
+        },
         "measurement": {
             "area_mm2": float(result["area_mm2"]),
             "area_cm2": float(result["area_cm2"]),
@@ -346,13 +352,14 @@ def main() -> None:
     calibration = load_calibration(args.calibration_file)
     table_diameter_mm = args.table_diameter_mm or float(calibration["table_diameter_mm"])
     strikes_per_test = args.strikes if args.strikes is not None else int(calibration["strikes_per_test"])
-    energy_per_strike_j = args.energy_per_strike_j if args.energy_per_strike_j is not None else calibration.get("energy_per_strike_j")
+    impact_mass_kg = args.impact_mass_kg if args.impact_mass_kg is not None else float(calibration.get("impact_mass_kg", 4.0))
+    drop_height_mm = args.drop_height_mm if args.drop_height_mm is not None else float(calibration.get("drop_height_mm", 10.0))
     if table_diameter_mm <= 0:
         sys.exit("--table-diameter-mm must be positive.")
     if strikes_per_test <= 0:
         sys.exit("--strikes must be a positive integer.")
-    if energy_per_strike_j is not None and energy_per_strike_j <= 0:
-        sys.exit("--energy-per-strike-j must be positive when set.")
+    if impact_mass_kg <= 0 or drop_height_mm <= 0:
+        sys.exit("--impact-mass-kg and --drop-height-mm must be positive.")
     args.output.mkdir(parents=True, exist_ok=True)
 
     camera = Picamera2()
@@ -370,7 +377,7 @@ def main() -> None:
             ellipse = find_table_ellipse(image, args.table_threshold)
         except RuntimeError as error:
             sys.exit(f"Saved raw image to {raw_path}; calibration failed: {error}")
-        save_calibration(args.calibration_file, table_diameter_mm, strikes_per_test, energy_per_strike_j, ellipse)
+        save_calibration(args.calibration_file, table_diameter_mm, strikes_per_test, impact_mass_kg, drop_height_mm, ellipse)
         calibration_path = args.output / f"{captured_at}_calibration.jpg"
         cv2.imwrite(str(calibration_path), render_calibration(image, ellipse, table_diameter_mm))
         print(f"Calibration image: {calibration_path}")
@@ -399,7 +406,8 @@ def main() -> None:
         result,
         calibration,
         table_diameter_mm,
-        energy_per_strike_j,
+        impact_mass_kg,
+        drop_height_mm,
         args,
     )
     print(f"Raw image: {raw_path}")
