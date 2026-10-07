@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 from datetime import datetime
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -18,6 +19,7 @@ CAPTURES = ROOT / "captures"
 MEASUREMENTS = CAPTURES / "measurements.csv"
 CAPTURE_SCRIPT = ROOT / "flowtable.py"
 CALIBRATION = ROOT / "calibration.json"
+SEQUENCE_STATE = ROOT / "sequence_state.json"
 
 app = Flask(__name__)
 
@@ -42,6 +44,7 @@ PAGE = """<!doctype html>
 <body><main>
   <header><div><h1>FlowTable</h1><p class="sub">Senaste kameramätningen från slagbordet</p></div><div><button id="capture">Ta ny mätning</button></div></header>
   <section class="card" style="margin-bottom:16px"><form id="calibrate"><strong>Kalibrering</strong><div class="label" style="margin:6px 0 10px">Lämna den vita skivan tom. Ange dess största verkliga diameter och antal slag för ett test.</div><label for="diameter">Största diameter (mm)</label> <input id="diameter" type="number" min="1" step="0.1" value="{{ calibration.table_diameter_mm }}" required> <label for="strikes" style="margin-left:12px">Antal slag</label> <input id="strikes" type="number" min="1" step="1" value="{{ calibration.strikes_per_test }}" required> <button type="submit" style="margin-left:8px">Kalibrera</button></form></section>
+  <section class="card" style="margin-bottom:16px"><strong>Slagserie</strong><div class="label" style="margin:6px 0 10px">Delmätning sparar en bild efter ett slag och räknar ned serien.</div><div class="value">{{ sequence.remaining }} <span class="unit">slag kvar av {{ sequence.target }}</span></div><div style="margin-top:12px"><button id="reset-series">Ny serie</button> <button id="partial" {% if sequence.remaining == 0 %}disabled{% endif %}>Delmätning · {{ sequence.remaining }} kvar</button></div></section>
   <p id="status">{{ status }}</p>
   {% if measurement %}
   <section class="stats">
@@ -54,9 +57,11 @@ PAGE = """<!doctype html>
   {% else %}<section class="image-card empty">Ingen godkänd mätning finns ännu. Rikta kameran mot slagbordet och välj “Ta ny mätning”.</section>{% endif %}
   {% if calibration_image %}<section class="image-card" style="margin-top:16px"><h2 style="font-size:17px;margin:0 0 10px">Senaste kalibrering</h2><img src="/captures/{{ calibration_image }}?v={{ calibration_image }}" alt="Kalibreringsbild med blå referensring"><footer>Den blå ringen ska följa den vita skivans ytterkant.</footer></section>{% endif %}
 </main><script>
-const button=document.querySelector('#capture'), status=document.querySelector('#status'), calibration=document.querySelector('#calibrate');
+const button=document.querySelector('#capture'), status=document.querySelector('#status'), calibration=document.querySelector('#calibrate'), resetSeries=document.querySelector('#reset-series'), partial=document.querySelector('#partial');
 button.addEventListener('click', async () => { button.disabled=true; status.textContent='Tar bild och beräknar utbredningen…'; try { const r=await fetch('/capture',{method:'POST'}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Mätningen misslyckades: '+e.message; button.disabled=false; } });
 calibration.addEventListener('submit', async (event) => { event.preventDefault(); const value=Number(document.querySelector('#diameter').value), strikes=Number(document.querySelector('#strikes').value); if (!(value>0 && Number.isInteger(strikes) && strikes>0)) return; status.textContent='Tar kalibreringsbild…'; try { const r=await fetch('/calibrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table_diameter_mm:value,strikes_per_test:strikes})}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Kalibreringen misslyckades: '+e.message; } });
+resetSeries.addEventListener('click', async () => { resetSeries.disabled=true; status.textContent='Startar ny slagserie…'; try { const r=await fetch('/sequence/reset',{method:'POST'}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Kunde inte starta serien: '+e.message; resetSeries.disabled=false; } });
+partial.addEventListener('click', async () => { partial.disabled=true; status.textContent='Sparar delmätning…'; try { const r=await fetch('/sequence/step',{method:'POST'}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Delmätningen misslyckades: '+e.message; partial.disabled=false; } });
 </script></body></html>"""
 
 
@@ -99,12 +104,45 @@ def calibration_settings() -> dict[str, float]:
     if not CALIBRATION.exists():
         return {"table_diameter_mm": 297.0, "strikes_per_test": 15}
     try:
-        import json
         with CALIBRATION.open() as file:
             data = json.load(file)
             return {"table_diameter_mm": float(data["table_diameter_mm"]), "strikes_per_test": int(data.get("strikes_per_test", 15))}
     except (OSError, ValueError, KeyError, json.JSONDecodeError):
         return {"table_diameter_mm": 297.0, "strikes_per_test": 15}
+
+
+def sequence_settings() -> dict[str, int]:
+    target = int(calibration_settings()["strikes_per_test"])
+    if not SEQUENCE_STATE.exists():
+        return {"target": target, "completed": 0, "remaining": target}
+    try:
+        with SEQUENCE_STATE.open() as file:
+            state = json.load(file)
+        target = int(state["target"])
+        completed = int(state["completed"])
+        remaining = int(state["remaining"])
+        if target <= 0 or completed < 0 or remaining < 0 or completed + remaining != target:
+            raise ValueError("invalid sequence state")
+        return {"target": target, "completed": completed, "remaining": remaining}
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return {"target": target, "completed": 0, "remaining": target}
+
+
+def save_sequence_state(state: dict[str, int]) -> None:
+    with SEQUENCE_STATE.open("w") as file:
+        json.dump(state, file)
+        file.write("\n")
+
+
+def capture_measurement() -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(CAPTURE_SCRIPT)],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=60,
+    )
 
 
 @app.get("/")
@@ -116,6 +154,7 @@ def dashboard():
         image=measured_image(measurement),
         calibration_image=latest_calibration_image(),
         calibration=calibration_settings(),
+        sequence=sequence_settings(),
         status=("Ingen betong upptäcktes — den kalibrerade skivan visas." if measurement and measurement["area_cm2"] == 0 else "Klar") if measurement else "Väntar på första mätningen",
     )
 
@@ -127,17 +166,33 @@ def capture_file(filename: str):
 
 @app.post("/capture")
 def capture():
-    result = subprocess.run(
-        [sys.executable, str(CAPTURE_SCRIPT)],
-        cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=60,
-    )
+    result = capture_measurement()
     if result.returncode:
         return jsonify(error=readable_capture_error(result.stdout)), 422
     return jsonify(ok=True, output=result.stdout)
+
+
+@app.post("/sequence/reset")
+def reset_sequence():
+    target = int(calibration_settings()["strikes_per_test"])
+    state = {"target": target, "completed": 0, "remaining": target}
+    save_sequence_state(state)
+    return jsonify(ok=True, **state)
+
+
+@app.post("/sequence/step")
+def sequence_step():
+    state = sequence_settings()
+    if state["remaining"] == 0:
+        return jsonify(error="Slagserien är redan klar. Starta en ny serie."), 409
+    # The motor pulse is added here when the driver GPIO pins are configured.
+    result = capture_measurement()
+    if result.returncode:
+        return jsonify(error=readable_capture_error(result.stdout)), 422
+    state["completed"] += 1
+    state["remaining"] -= 1
+    save_sequence_state(state)
+    return jsonify(ok=True, **state)
 
 
 @app.post("/calibrate")
