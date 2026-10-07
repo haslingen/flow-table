@@ -52,10 +52,11 @@ PAGE = """<!doctype html>
   </section>
   <section class="image-card"><img src="/captures/{{ image }}?v={{ measurement.captured_at_utc }}" alt="Senaste markerade kamerabild"><footer>Mätt {{ measurement.captured_at_display }} UTC</footer></section>
   {% else %}<section class="image-card empty">Ingen godkänd mätning finns ännu. Rikta kameran mot slagbordet och välj “Ta ny mätning”.</section>{% endif %}
+  {% if calibration_image %}<section class="image-card" style="margin-top:16px"><h2 style="font-size:17px;margin:0 0 10px">Senaste kalibrering</h2><img src="/captures/{{ calibration_image }}?v={{ calibration_image }}" alt="Kalibreringsbild med blå referensring"><footer>Den blå ringen ska följa den vita skivans ytterkant.</footer></section>{% endif %}
 </main><script>
 const button=document.querySelector('#capture'), status=document.querySelector('#status'), calibration=document.querySelector('#calibrate');
 button.addEventListener('click', async () => { button.disabled=true; status.textContent='Tar bild och beräknar utbredningen…'; try { const r=await fetch('/capture',{method:'POST'}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Mätningen misslyckades: '+e.message; button.disabled=false; } });
-calibration.addEventListener('submit', async (event) => { event.preventDefault(); const value=Number(document.querySelector('#diameter').value); if (!(value>0)) return; status.textContent='Tar kalibreringsbild…'; try { const r=await fetch('/calibrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table_diameter_mm:value})}); const data=await r.json(); if (!r.ok) throw new Error(data.error); status.textContent='Kalibreringen är sparad.'; } catch(e) { status.textContent='Kalibreringen misslyckades: '+e.message; } });
+calibration.addEventListener('submit', async (event) => { event.preventDefault(); const value=Number(document.querySelector('#diameter').value); if (!(value>0)) return; status.textContent='Tar kalibreringsbild…'; try { const r=await fetch('/calibrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table_diameter_mm:value})}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Kalibreringen misslyckades: '+e.message; } });
 </script></body></html>"""
 
 
@@ -78,6 +79,11 @@ def measured_image(measurement: dict[str, object] | None) -> str | None:
         return None
     candidate = f"{measurement['captured_at_utc']}_measured.jpg"
     return candidate if (CAPTURES / candidate).is_file() else None
+
+
+def latest_calibration_image() -> str | None:
+    images = sorted(CAPTURES.glob("*_calibration.jpg"))
+    return images[-1].name if images else None
 
 
 def readable_capture_error(output: str) -> str:
@@ -107,6 +113,7 @@ def dashboard():
         PAGE,
         measurement=measurement,
         image=measured_image(measurement),
+        calibration_image=latest_calibration_image(),
         calibration=calibration_settings(),
         status="Klar" if measurement else "Väntar på första mätningen",
     )
