@@ -129,6 +129,10 @@ def sequence_settings() -> dict[str, int]:
         measurements = state.get("measurements", [])
         if not isinstance(measurements, list):
             raise ValueError("invalid measurement state")
+        # Series created before energy logging lack this optional field.
+        for point in measurements:
+            if isinstance(point, dict):
+                point.setdefault("cumulative_input_j", None)
         return {"id": state.get("id"), "target": target, "completed": completed, "remaining": remaining, "measurements": measurements}
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
         return {"id": None, "target": target, "completed": 0, "remaining": target, "measurements": []}
