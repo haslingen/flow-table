@@ -169,6 +169,7 @@ def measure(
     table_threshold: int,
     reference_ellipse: tuple[tuple[float, float], tuple[float, float], float] | None = None,
 ) -> dict[str, object]:
+    analysis_started = time.perf_counter()
     ellipse = reference_ellipse or find_table_ellipse(image, table_threshold)
     geometry = table_geometry(ellipse, table_diameter_mm)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -197,10 +198,13 @@ def measure(
         cv2.MORPH_CLOSE,
         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)),
     )
+    segmentation_ms = (time.perf_counter() - analysis_started) * 1000
 
+    contour_started = time.perf_counter()
     contours, _ = cv2.findContours(concrete_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contour = max(contours, key=cv2.contourArea) if contours else None
     area_px = cv2.contourArea(contour) if contour is not None else 0
+    contour_ms = (time.perf_counter() - contour_started) * 1000
     if contour is None or area_px < 100 or len(contour) < 5:
         return {
             "table_ellipse": geometry["ellipse"],
@@ -213,14 +217,17 @@ def measure(
             "ellipse_angle_deg": 0.0,
             "concrete_mask": concrete_mask,
             "contour": None,
+            "timings_ms": {"segmentation_ms": round(segmentation_ms, 2), "contour_ms": round(contour_ms, 2), "measurement_ms": 0.0, "total_analysis_ms": round((time.perf_counter() - analysis_started) * 1000, 2)},
         }
 
+    measurement_started = time.perf_counter()
     physical_contour = contour_in_mm(contour, geometry)
     (_, _), (axis_a, axis_b), angle = cv2.fitEllipse(physical_contour)
     diameter_max_mm = max(axis_a, axis_b)
     diameter_min_mm = min(axis_a, axis_b)
     area_mm2 = cv2.contourArea(physical_contour)
     equivalent_diameter_mm = (4 * area_mm2 / np.pi) ** 0.5
+    measurement_ms = (time.perf_counter() - measurement_started) * 1000
     return {
         "table_ellipse": geometry["ellipse"],
         "pixels_per_mm": (geometry["major_px_per_mm"] * geometry["minor_px_per_mm"]) ** 0.5,
@@ -232,6 +239,7 @@ def measure(
         "ellipse_angle_deg": angle,
         "concrete_mask": concrete_mask,
         "contour": contour,
+        "timings_ms": {"segmentation_ms": round(segmentation_ms, 2), "contour_ms": round(contour_ms, 2), "measurement_ms": round(measurement_ms, 2), "total_analysis_ms": round((time.perf_counter() - analysis_started) * 1000, 2)},
     }
 
 
