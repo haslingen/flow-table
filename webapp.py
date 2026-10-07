@@ -20,6 +20,9 @@ MEASUREMENTS = CAPTURES / "measurements.csv"
 CAPTURE_SCRIPT = ROOT / "flowtable.py"
 CALIBRATION = ROOT / "calibration.json"
 SEQUENCE_STATE = ROOT / "sequence_state.json"
+DATA_ROOT = ROOT / "data"
+FILM_SCRIPT = ROOT / "film_capture.py"
+film_process: subprocess.Popen[str] | None = None
 
 app = Flask(__name__)
 
@@ -45,6 +48,7 @@ PAGE = """<!doctype html>
 <body><main>
   <header><div><h1>FlowTable</h1><p class="sub">Senaste kameramätningen från slagbordet</p></div><div><button id="capture">Ta ny mätning</button></div></header>
   <section class="card" style="margin-bottom:16px"><form id="calibrate"><strong>Kalibrering</strong><div class="label" style="margin:6px 0 10px">Lämna den vita skivan tom. Slaget följer EN 1015-3 med fallhöjd 10 mm. Ange den rörliga slagvikten; lägesenergin beräknas automatiskt.</div><label for="diameter">Största diameter (mm)</label> <input id="diameter" type="number" min="1" step="0.1" value="{{ calibration.table_diameter_mm }}" required> <label for="strikes" style="margin-left:12px">Antal slag</label> <input id="strikes" type="number" min="1" step="1" value="{{ calibration.strikes_per_test }}" required> <label for="mass" style="margin-left:12px">Slagvikt (kg)</label> <input id="mass" type="number" min="0.001" step="0.001" value="{{ calibration.impact_mass_kg }}" required> <span id="energy-preview" class="label" style="margin-left:8px">{{ calibration.impact_mass_kg|round(3) }} kg × 10 mm → {{ calibration.gravitational_energy_per_strike_j|round(3) }} J/slag</span> <button type="submit" style="margin-left:8px">Kalibrera</button></form></section>
+  <section class="card" style="margin-bottom:16px"><form id="film"><strong>Filmning</strong><div class="label" style="margin:6px 0 10px">Fullupplösta rutor fångas oberoende av analysen. Efteråt skapas en MP4-förhandsvisning från de markerade rutorna.</div><label for="frequency">Bilder/s</label> <input id="frequency" type="number" min="0.1" max="10" step="0.1" value="1"> <label for="duration" style="margin-left:12px">Tid (s)</label> <input id="duration" type="number" min="1" max="3600" step="1" value="15"> <button id="film-start" type="submit" style="margin-left:8px">Starta filmning</button> <span id="film-status" class="label" style="margin-left:8px">{{ film.status }}</span>{% if film.preview_url %} <a href="{{ film.preview_url }}" style="margin-left:8px">Öppna senaste film</a>{% endif %}</form></section>
   <section class="card" style="margin-bottom:16px"><strong>Slagserie</strong><div class="label" style="margin:6px 0 10px">Delmätning sparar en bild efter ett slag och räknar ned serien.</div><div class="value">{{ sequence.remaining }} <span class="unit">slag kvar av {{ sequence.target }}</span></div><div style="margin-top:12px"><button id="reset-series">Ny serie</button> <button id="partial" {% if sequence.remaining == 0 %}disabled{% endif %}>Delmätning · {{ sequence.remaining }} kvar</button></div></section>
   {% if analysis %}<section class="card" style="margin-bottom:16px"><h2 style="font-size:17px;margin:0 0 6px">Analys av aktuell slagserie</h2><div class="label">{{ analysis.summary }}</div><section class="stats" style="margin:14px 0 0"><div class="card"><div class="label">Areaförändring</div><div class="value">{{ analysis.area_change|round(1) }} <span class="unit">cm²</span></div></div><div class="card"><div class="label">Diameterförändring</div><div class="value">{{ analysis.diameter_change|round(1) }} <span class="unit">mm</span></div></div><div class="card"><div class="label">Beräknad lägesenergi</div><div class="value">{{ analysis.energy_input_j|round(3) if analysis.energy_input_j is not none else 'Ej angivet' }} <span class="unit">{% if analysis.energy_input_j is not none %}J{% endif %}</span></div></div></section><table><thead><tr><th>Slag</th><th>Area</th><th>Ekv. Ø</th><th>Max Ø</th><th>Min Ø</th><th>Lägesenergi</th></tr></thead><tbody>{% for point in sequence.measurements %}<tr><td>{{ point.strike }}</td><td>{{ point.area_cm2|round(1) }} cm²</td><td>{{ point.equivalent_diameter_mm|round(1) }} mm</td><td>{{ point.diameter_max_mm|round(1) }} mm</td><td>{{ point.diameter_min_mm|round(1) }} mm</td><td>{{ point.cumulative_gravitational_energy_j|round(3) if point.cumulative_gravitational_energy_j is not none else '—' }}{% if point.cumulative_gravitational_energy_j is not none %} J{% endif %}</td></tr>{% endfor %}</tbody></table></section>{% endif %}
   <p id="status">{{ status }}</p>
@@ -62,6 +66,8 @@ PAGE = """<!doctype html>
 const button=document.querySelector('#capture'), status=document.querySelector('#status'), calibration=document.querySelector('#calibrate'), resetSeries=document.querySelector('#reset-series'), partial=document.querySelector('#partial');
 const massInput=document.querySelector('#mass'), energyPreview=document.querySelector('#energy-preview');
 massInput.addEventListener('input', () => { const mass=Number(massInput.value); energyPreview.textContent=mass>0 ? `${mass.toFixed(3)} kg × 10 mm → ${(mass * 9.80665 * 0.01).toFixed(3)} J/slag` : 'Ange en positiv slagvikt'; });
+const film=document.querySelector('#film'), filmStart=document.querySelector('#film-start'), filmStatus=document.querySelector('#film-status');
+film.addEventListener('submit', async (event) => { event.preventDefault(); const frequency=Number(document.querySelector('#frequency').value), duration=Number(document.querySelector('#duration').value); if (!(frequency>=0.1 && frequency<=10 && duration>=1 && duration<=3600)) return; filmStart.disabled=true; filmStatus.textContent='Startar kamerainspelning…'; try { const r=await fetch('/film/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({frequency_hz:frequency,duration_s:duration})}); const data=await r.json(); if (!r.ok) throw new Error(data.error); filmStatus.textContent=`Filmning pågår: ${data.frames} rutor planerade`; } catch(e) { filmStatus.textContent='Filmningen misslyckades: '+e.message; filmStart.disabled=false; } });
 button.addEventListener('click', async () => { button.disabled=true; status.textContent='Tar bild och beräknar utbredningen…'; try { const r=await fetch('/capture',{method:'POST'}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Mätningen misslyckades: '+e.message; button.disabled=false; } });
 calibration.addEventListener('submit', async (event) => { event.preventDefault(); const value=Number(document.querySelector('#diameter').value), strikes=Number(document.querySelector('#strikes').value), mass=Number(document.querySelector('#mass').value); if (!(value>0 && Number.isInteger(strikes) && strikes>0 && mass>0)) return; status.textContent='Tar kalibreringsbild…'; try { const r=await fetch('/calibrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table_diameter_mm:value,strikes_per_test:strikes,impact_mass_kg:mass})}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Kalibreringen misslyckades: '+e.message; } });
 resetSeries.addEventListener('click', async () => { resetSeries.disabled=true; status.textContent='Startar ny slagserie…'; try { const r=await fetch('/sequence/reset',{method:'POST'}); const data=await r.json(); if (!r.ok) throw new Error(data.error); location.reload(); } catch(e) { status.textContent='Kunde inte starta serien: '+e.message; resetSeries.disabled=false; } });
@@ -188,6 +194,20 @@ def sequence_analysis(sequence: dict[str, object]) -> dict[str, object] | None:
     return {"first": first, "last": last, "area_change": area_change, "diameter_change": diameter_change, "energy_input_j": energy_input_j, "summary": summary}
 
 
+def latest_film() -> dict[str, object]:
+    """Expose the newest completed film without making it part of measurement data."""
+    candidates = sorted(DATA_ROOT.glob("*/film_*/status.json"), key=lambda path: path.stat().st_mtime, reverse=True) if DATA_ROOT.exists() else []
+    if not candidates:
+        return {"status": "Ingen filmning gjord ännu.", "preview_url": None}
+    try:
+        with candidates[0].open() as file:
+            state = json.load(file)
+        preview = state.get("preview_video")
+        return {"status": state.get("status", "ok"), "preview_url": f"/data/{Path(preview).relative_to(DATA_ROOT)}" if preview else None}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {"status": "Kunde inte läsa filmstatus.", "preview_url": None}
+
+
 @app.get("/")
 def dashboard():
     measurement = latest_measurement()
@@ -200,6 +220,7 @@ def dashboard():
         calibration=calibration_settings(),
         sequence=sequence,
         analysis=sequence_analysis(sequence),
+        film=latest_film(),
         status=("Ingen betong upptäcktes — den kalibrerade skivan visas." if measurement and measurement["area_cm2"] == 0 else "Klar") if measurement else "Väntar på första mätningen",
     )
 
@@ -207,6 +228,35 @@ def dashboard():
 @app.get("/captures/<path:filename>")
 def capture_file(filename: str):
     return send_from_directory(CAPTURES, filename)
+
+
+@app.get("/data/<path:filename>")
+def data_file(filename: str):
+    return send_from_directory(DATA_ROOT, filename)
+
+
+@app.post("/film/start")
+def start_film():
+    global film_process
+    if film_process is not None and film_process.poll() is None:
+        return jsonify(error="Filmning pågår redan."), 409
+    data = request.get_json(silent=True) or {}
+    try:
+        frequency = float(data.get("frequency_hz", 1.0))
+        duration = float(data.get("duration_s", 15.0))
+    except (TypeError, ValueError):
+        return jsonify(error="Ange giltiga värden för bilder per sekund och tid."), 400
+    if not 0.1 <= frequency <= 10 or not 1 <= duration <= 3600:
+        return jsonify(error="Bilder/s måste vara 0,1–10 och tiden 1–3 600 sekunder."), 400
+    test_id = f"film_{datetime.now().astimezone().strftime('%Y-%m-%d:%H%M%S')}"
+    film_process = subprocess.Popen(
+        [sys.executable, str(FILM_SCRIPT), "--test-id", test_id, "--frequency-hz", str(frequency), "--duration-s", str(duration)],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return jsonify(ok=True, test_id=test_id, frames=round(frequency * duration))
 
 
 @app.post("/capture")
